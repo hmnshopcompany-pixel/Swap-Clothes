@@ -69,6 +69,11 @@ export default function App() {
     setError(null);
     setResultImages([]);
 
+    const MAX_RETRIES = 3;
+    const INITIAL_BACKOFF = 2000; // 2 seconds
+
+    const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
     try {
       const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || '' });
       const model = "gemini-3.1-flash-image-preview";
@@ -76,35 +81,54 @@ export default function App() {
       const baseImageData = baseImage.split(',')[1];
       const outfitImageData = outfitImage.split(',')[1];
 
-      const generateImage = async (posePrompt: string) => {
-        const response = await ai.models.generateContent({
-          model: model,
-          contents: {
-            parts: [
-              { inlineData: { data: baseImageData, mimeType: "image/png" } },
-              { inlineData: { data: outfitImageData, mimeType: "image/png" } },
-              { text: posePrompt }
-            ]
-          },
-          config: {
-            imageConfig: {
-              imageSize: "2K",
-              aspectRatio: "3:4"
-            }
-          }
-        });
+      const generateImageWithRetry = async (posePrompt: string) => {
+        let lastError: any = null;
+        for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+          try {
+            const response = await ai.models.generateContent({
+              model: model,
+              contents: {
+                parts: [
+                  { inlineData: { data: baseImageData, mimeType: "image/png" } },
+                  { inlineData: { data: outfitImageData, mimeType: "image/png" } },
+                  { text: posePrompt }
+                ]
+              },
+              config: {
+                imageConfig: {
+                  imageSize: "1K",
+                  aspectRatio: "3:4"
+                }
+              }
+            });
 
-        for (const part of response.candidates?.[0]?.content?.parts || []) {
-          if (part.inlineData) {
-            return `data:image/png;base64,${part.inlineData.data}`;
+            for (const part of response.candidates?.[0]?.content?.parts || []) {
+              if (part.inlineData) {
+                return `data:image/png;base64,${part.inlineData.data}`;
+              }
+            }
+            return null;
+          } catch (err: any) {
+            lastError = err;
+            // Retry on 503 (Service Unavailable) or 429 (Too Many Requests)
+            const isRetryable = err.message?.includes("503") || err.message?.includes("429") || 
+                               err.status === "UNAVAILABLE" || err.code === 503;
+            
+            if (isRetryable && attempt < MAX_RETRIES) {
+              const delay = INITIAL_BACKOFF * Math.pow(2, attempt);
+              console.log(`Attempt ${attempt + 1} failed due to high demand. Retrying in ${delay}ms...`);
+              await sleep(delay);
+              continue;
+            }
+            throw err;
           }
         }
-        return null;
+        throw lastError;
       };
 
       if (mode === 'single') {
-        const prompt = "Keep the face and body shape of the person in the first image exactly the same. Change their clothing to match the style, color, and texture of the outfit shown in the second image. The final image should look realistic, maintain the original person's identity, and be rendered in high 2K resolution with crisp details.";
-        const img = await generateImage(prompt);
+        const prompt = "Keep the face and body shape of the person in the first image exactly the same. Change their clothing to match the style, color, and texture of the outfit shown in the second image. The final image should look realistic, maintain the original person's identity, and be rendered in high 1080p resolution with crisp details.";
+        const img = await generateImageWithRetry(prompt);
         if (img) setResultImages([img]);
         else setError("The AI didn't return an image. Please try again.");
       } else {
@@ -114,7 +138,8 @@ export default function App() {
           "Keep the face and body shape of the person in the first image exactly the same. Change their clothing to match the outfit in the second image. Show the person in a relaxed, candid pose with a slight smile."
         ];
         
-        const results = await Promise.all(poses.map(p => generateImage(p + " Render in high 2K resolution.")));
+        // For multiple poses, we still use Promise.all but each has its own retry logic
+        const results = await Promise.all(poses.map(p => generateImageWithRetry(p + " Render in high 1080p resolution.")));
         const validResults = results.filter((img): img is string => img !== null);
         
         if (validResults.length > 0) {
@@ -128,6 +153,10 @@ export default function App() {
       if (err.message?.includes("Requested entity was not found")) {
         setHasApiKey(false);
         setError("API Key session expired. Please re-select your API key.");
+      } else if (err.message?.includes("503") || err.status === "UNAVAILABLE") {
+        setError("The AI service is currently very busy. We tried retrying, but it's still unavailable. Please wait a minute and try again.");
+      } else if (err.message?.includes("429")) {
+        setError("Too many requests. Please slow down and try again in a moment.");
       } else {
         setError("Failed to process the image. Please check your connection and try again.");
       }
@@ -156,7 +185,7 @@ export default function App() {
           </div>
           <h2 className="text-2xl font-bold mb-4">High-Quality Mode</h2>
           <p className="text-white/40 mb-8">
-            To generate 2K high-resolution images, you need to select a paid Gemini API key. 
+            To generate 1080p high-resolution images, you need to select a paid Gemini API key. 
             <a href="https://ai.google.dev/gemini-api/docs/billing" target="_blank" rel="noopener noreferrer" className="text-orange-400 hover:underline ml-1">
               Learn about billing
             </a>
@@ -190,7 +219,7 @@ export default function App() {
             className="inline-flex items-center gap-2 px-3 py-1 rounded-full border border-white/10 bg-white/5 mb-6"
           >
             <Sparkles className="w-4 h-4 text-orange-400" />
-            <span className="text-xs font-medium uppercase tracking-wider text-white/60">2K Ultra HD Mode Active</span>
+            <span className="text-xs font-medium uppercase tracking-wider text-white/60">1080p HD Mode Active</span>
           </motion.div>
           <motion.h1 
             initial={{ opacity: 0, y: 20 }}
@@ -206,7 +235,7 @@ export default function App() {
             transition={{ delay: 0.2 }}
             className="text-lg text-white/40 max-w-2xl mx-auto"
           >
-            Upload a character and an outfit. Our AI will seamlessly swap the clothes in stunning 2K resolution.
+            Upload a character and an outfit. Our AI will seamlessly swap the clothes in stunning 1080p resolution.
           </motion.p>
         </header>
 
@@ -287,7 +316,7 @@ export default function App() {
                 ) : (
                   <Sparkles className="w-4 h-4" />
                 )}
-                Generate 2K Look
+                Generate 1080p Look
               </button>
 
               <button
@@ -322,7 +351,7 @@ export default function App() {
           <div className="space-y-6">
             <div className="flex items-center justify-between">
               <h2 className="text-xl font-semibold flex items-center gap-2">
-                Result <span className="text-[10px] bg-orange-500/20 text-orange-400 px-2 py-0.5 rounded-full border border-orange-500/30 font-mono">2K</span>
+                Result <span className="text-[10px] bg-orange-500/20 text-orange-400 px-2 py-0.5 rounded-full border border-orange-500/30 font-mono">1080p</span>
               </h2>
               {resultImages.length > 0 && (
                 <button 
@@ -384,7 +413,7 @@ export default function App() {
                     <div className="w-20 h-20 bg-white/5 rounded-full flex items-center justify-center mx-auto mb-6 border border-white/10">
                       <Shirt className="w-8 h-8 text-white/20" />
                     </div>
-                    <p className="text-white/20 max-w-[200px] mx-auto">Upload images and choose an action to see the magic</p>
+                    <p className="text-white/20 max-w-[200px] mx-auto">Upload images and choose an action to see the magic in 1080p</p>
                   </motion.div>
                 )}
               </AnimatePresence>
@@ -395,7 +424,7 @@ export default function App() {
 
         {/* Footer Info */}
         <footer className="mt-24 pt-12 border-t border-white/5 text-center text-white/20 text-sm">
-          <p>© 2026 AI Outfit Swapper. Powered by Gemini 3.1 Flash Image (2K Mode).</p>
+          <p>© 2026 AI Outfit Swapper. Powered by Gemini 3.1 Flash Image (1080p Mode).</p>
         </footer>
       </main>
     </div>
