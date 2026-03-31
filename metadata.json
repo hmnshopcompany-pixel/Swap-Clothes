@@ -1,0 +1,5 @@
+{
+  "name": "AI Outfit Swapper",
+  "description": "Change character clothes while keeping faces and body shapes consistent using AI.",
+  "requestFramePermissions": []
+}
