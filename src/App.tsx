@@ -5,7 +5,7 @@
 
 import React, { useState, useRef, useEffect } from 'react';
 import { GoogleGenAI, Modality } from "@google/genai";
-import { Upload, Shirt, User, Sparkles, Loader2, RefreshCw, Download, Key, ShieldCheck, Image as ImageIcon, Film, FileText, Video, Monitor, Mic, Volume2, Smartphone, X } from 'lucide-react';
+import { Upload, Shirt, User, Sparkles, Loader2, RefreshCw, Download, Key, ShieldCheck, Image as ImageIcon, Film, FileText, Video, Monitor, Mic, Volume2, Smartphone, X, Plus, Settings } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 
 // Extend window interface for AI Studio API key selection
@@ -24,8 +24,18 @@ export default function App() {
   const [resultImages, setResultImages] = useState<string[]>([]);
   const [isProcessing, setIsProcessing] = useState<'single' | 'poses' | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [swapResolution, setSwapResolution] = useState<'512px' | '1K' | '2K'>('2K');
 
-  const [activeTab, setActiveTab] = useState<'image' | 'video'>('image');
+  const [activeTab, setActiveTab] = useState<'t2i' | 'image' | 'video'>('t2i');
+  
+  const [t2iPrompt, setT2iPrompt] = useState<string>('');
+  const [t2iImage, setT2iImage] = useState<string | null>(null);
+  const [t2iResult, setT2iResult] = useState<string | null>(null);
+  const [isT2iProcessing, setIsT2iProcessing] = useState(false);
+  const [t2iError, setT2iError] = useState<string | null>(null);
+  const [t2iAspectRatio, setT2iAspectRatio] = useState<'1:1' | '16:9' | '9:16'>('1:1');
+  const [t2iResolution, setT2iResolution] = useState<'512px' | '1K' | '2K'>('2K');
+
   const [videoImage, setVideoImage] = useState<string | null>(null);
   const [videoEndImage, setVideoEndImage] = useState<string | null>(null);
   const [videoPrompt, setVideoPrompt] = useState<string>('');
@@ -35,6 +45,7 @@ export default function App() {
   const [videoStatus, setVideoStatus] = useState<string>('');
   
   const [videoAspectRatio, setVideoAspectRatio] = useState<'16:9' | '9:16'>('16:9');
+  const [videoResolution, setVideoResolution] = useState<'720p' | '1080p'>('1080p');
   const [ttsText, setTtsText] = useState<string>('');
   const [ttsVoice, setTtsVoice] = useState<string>('Kore');
   const [audioResult, setAudioResult] = useState<string | null>(null);
@@ -44,6 +55,7 @@ export default function App() {
 
   const baseInputRef = useRef<HTMLInputElement>(null);
   const outfitInputRef = useRef<HTMLInputElement>(null);
+  const t2iInputRef = useRef<HTMLInputElement>(null);
   const videoInputRef = useRef<HTMLInputElement>(null);
   const videoEndInputRef = useRef<HTMLInputElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -91,6 +103,15 @@ export default function App() {
     }
   };
 
+  const handleT2iImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      const reader = new FileReader();
+      reader.onloadend = () => setT2iImage(reader.result as string);
+      reader.readAsDataURL(file);
+    }
+  };
+
   const handleVideoEndImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) {
@@ -132,8 +153,97 @@ export default function App() {
     }
   };
 
+  const performT2iGeneration = async () => {
+    if (!t2iPrompt.trim()) return;
+
+    setIsT2iProcessing(true);
+    setT2iError(null);
+    setT2iResult(null);
+
+    const MAX_RETRIES = 3;
+    const INITIAL_BACKOFF = 2000; // 2 seconds
+    const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
+    try {
+      const apiKey = process.env.GEMINI_API_KEY || '';
+      const ai = new GoogleGenAI({ apiKey });
+      
+      const parts: any[] = [];
+      if (t2iImage) {
+        const base64Data = t2iImage.split(',')[1];
+        const mimeMatch = t2iImage.match(/^data:(image\/[a-zA-Z+]+);base64,/);
+        const mimeType = mimeMatch ? mimeMatch[1] : 'image/png';
+        parts.push({ inlineData: { data: base64Data, mimeType } });
+      }
+      parts.push({ text: t2iPrompt });
+
+      let lastError: any = null;
+      let foundImage = false;
+
+      for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+        try {
+          const response = await ai.models.generateContent({
+            model: 'gemini-3.1-flash-image-preview',
+            contents: { parts },
+            config: {
+              imageConfig: {
+                aspectRatio: t2iAspectRatio,
+                imageSize: t2iResolution
+              }
+            }
+          });
+
+          for (const part of response.candidates?.[0]?.content?.parts || []) {
+            if (part.inlineData) {
+              setT2iResult(`data:${part.inlineData.mimeType};base64,${part.inlineData.data}`);
+              foundImage = true;
+              break;
+            }
+          }
+
+          if (foundImage) {
+            break; // Success, exit retry loop
+          } else {
+            throw new Error("No image was returned from the model.");
+          }
+        } catch (err: any) {
+          lastError = err;
+          const isRetryable = err.message?.includes("503") || err.message?.includes("429") || 
+                             err.status === "UNAVAILABLE" || err.code === 503;
+          
+          if (isRetryable && attempt < MAX_RETRIES) {
+            const delay = INITIAL_BACKOFF * Math.pow(2, attempt);
+            console.log(`Attempt ${attempt + 1} failed due to high demand. Retrying in ${delay}ms...`);
+            await sleep(delay);
+            continue;
+          }
+          throw err; // Re-throw if not retryable or max retries reached
+        }
+      }
+
+      if (!foundImage && !lastError) {
+        throw new Error("No image was returned from the model.");
+      }
+
+    } catch (err: any) {
+      console.error("Image generation error:", err);
+      if (err.message?.includes("Requested entity was not found")) {
+        setHasApiKey(false);
+        setT2iError("API Key session expired. Please re-select your API key.");
+      } else if (err.message?.includes("503") || err.status === "UNAVAILABLE" || err.code === 503) {
+        setT2iError("The AI service is currently very busy. We tried retrying, but it's still unavailable. Please wait a minute and try again.");
+      } else if (err.message?.includes("429")) {
+        setT2iError("Too many requests. Please slow down and try again in a moment.");
+      } else {
+        setT2iError(err.message || "Failed to generate image. Please try again.");
+      }
+    } finally {
+      setIsT2iProcessing(false);
+    }
+  };
+
   const performVideoGeneration = async () => {
-    if (!videoImage || !videoPrompt) return;
+    if (!videoPrompt) return;
 
     setIsVideoProcessing(true);
     setVideoError(null);
@@ -170,9 +280,13 @@ export default function App() {
       }
 
       const model = 'veo-3.1-fast-generate-preview';
-      const base64Data = videoImage.split(',')[1];
-      const mimeMatch = videoImage.match(/^data:(image\/[a-zA-Z+]+);base64,/);
-      const mimeType = mimeMatch ? mimeMatch[1] : 'image/png';
+      
+      let base64Data, mimeType;
+      if (videoImage) {
+        base64Data = videoImage.split(',')[1];
+        const mimeMatch = videoImage.match(/^data:(image\/[a-zA-Z+]+);base64,/);
+        mimeType = mimeMatch ? mimeMatch[1] : 'image/png';
+      }
 
       let lastFrameConfig = undefined;
       if (videoEndImage) {
@@ -186,20 +300,54 @@ export default function App() {
       }
 
       setVideoStatus('Sending request to Veo model...');
-      let operation = await ai.models.generateVideos({
+      let operation: any = null;
+      let lastError: any = null;
+      
+      const MAX_RETRIES = 3;
+      const INITIAL_BACKOFF = 2000;
+      const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
+      const videoParams: any = {
         model: model,
         prompt: videoPrompt,
-        image: {
-          imageBytes: base64Data,
-          mimeType: mimeType,
-        },
         config: {
           numberOfVideos: 1,
-          resolution: lastFrameConfig ? '720p' : '1080p',
+          resolution: lastFrameConfig ? '720p' : videoResolution,
           aspectRatio: videoAspectRatio,
           ...(lastFrameConfig ? { lastFrame: lastFrameConfig } : {})
         }
-      });
+      };
+
+      if (videoImage) {
+        videoParams.image = {
+          imageBytes: base64Data,
+          mimeType: mimeType,
+        };
+      }
+
+      for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+        try {
+          operation = await ai.models.generateVideos(videoParams);
+          break; // Success, exit retry loop
+        } catch (err: any) {
+          lastError = err;
+          const isRetryable = err.message?.includes("503") || err.message?.includes("429") || 
+                             err.status === "UNAVAILABLE" || err.code === 503;
+          
+          if (isRetryable && attempt < MAX_RETRIES) {
+            const delay = INITIAL_BACKOFF * Math.pow(2, attempt);
+            setVideoStatus(`High demand. Retrying in ${delay/1000}s...`);
+            console.log(`Attempt ${attempt + 1} failed due to high demand. Retrying in ${delay}ms...`);
+            await sleep(delay);
+            continue;
+          }
+          throw err; // Re-throw if not retryable or max retries reached
+        }
+      }
+
+      if (!operation) {
+        throw lastError || new Error("Failed to start video generation.");
+      }
 
       let pollCount = 0;
       const loadingMessages = [
@@ -225,7 +373,14 @@ export default function App() {
 
       const downloadLink = operation.response?.generatedVideos?.[0]?.video?.uri;
       if (!downloadLink) {
-        throw new Error("No video returned from the API.");
+        console.error("Operation object:", operation);
+        
+        if (operation.response?.raiMediaFilteredReasons?.length > 0) {
+          throw new Error(`Safety Filter Blocked: ${operation.response.raiMediaFilteredReasons[0]}`);
+        }
+        
+        const details = operation.response ? JSON.stringify(operation.response) : 'No response';
+        throw new Error(`No video returned from the API. Details: ${details}`);
       }
 
       setVideoStatus('Fetching final video file...');
@@ -248,6 +403,10 @@ export default function App() {
       if (err.message?.includes("Requested entity was not found")) {
         setHasApiKey(false);
         setVideoError("API Key session expired. Please re-select your API key.");
+      } else if (err.message?.includes("503") || err.status === "UNAVAILABLE" || err.code === 503) {
+        setVideoError("The AI service is currently very busy. We tried retrying, but it's still unavailable. Please wait a minute and try again.");
+      } else if (err.message?.includes("429")) {
+        setVideoError("Too many requests. Please slow down and try again in a moment.");
       } else {
         setVideoError(err.message || "Failed to generate video. Please try again.");
       }
@@ -291,7 +450,7 @@ export default function App() {
               },
               config: {
                 imageConfig: {
-                  imageSize: "1K",
+                  imageSize: swapResolution,
                   aspectRatio: "3:4"
                 }
               }
@@ -348,7 +507,7 @@ export default function App() {
       if (err.message?.includes("Requested entity was not found")) {
         setHasApiKey(false);
         setError("API Key session expired. Please re-select your API key.");
-      } else if (err.message?.includes("503") || err.status === "UNAVAILABLE") {
+      } else if (err.message?.includes("503") || err.status === "UNAVAILABLE" || err.code === 503) {
         setError("The AI service is currently very busy. We tried retrying, but it's still unavailable. Please wait a minute and try again.");
       } else if (err.message?.includes("429")) {
         setError("Too many requests. Please slow down and try again in a moment.");
@@ -433,10 +592,16 @@ export default function App() {
             className="flex items-center justify-center gap-4 mb-8"
           >
             <button
+              onClick={() => setActiveTab('t2i')}
+              className={`px-6 py-3 rounded-xl font-semibold flex items-center gap-2 transition-all ${activeTab === 't2i' ? 'bg-white text-black shadow-[0_0_20px_rgba(255,255,255,0.2)]' : 'bg-white/5 text-white/60 hover:bg-white/10 hover:text-white'}`}
+            >
+              <ImageIcon className="w-5 h-5" /> Image Generator
+            </button>
+            <button
               onClick={() => setActiveTab('image')}
               className={`px-6 py-3 rounded-xl font-semibold flex items-center gap-2 transition-all ${activeTab === 'image' ? 'bg-white text-black shadow-[0_0_20px_rgba(255,255,255,0.2)]' : 'bg-white/5 text-white/60 hover:bg-white/10 hover:text-white'}`}
             >
-              <ImageIcon className="w-5 h-5" /> Outfit Swapper
+              <Shirt className="w-5 h-5" /> Outfit Swapper
             </button>
             <button
               onClick={() => setActiveTab('video')}
@@ -448,6 +613,193 @@ export default function App() {
         </header>
 
         {/* Main Interface */}
+        {activeTab === 't2i' && (
+          <div className="max-w-4xl mx-auto space-y-12">
+            {/* Input Section */}
+            <div className="space-y-6">
+              <div className="flex flex-col md:flex-row gap-4">
+                <div className="flex-1">
+                  <label className="block text-sm font-medium text-white/60 mb-2 flex items-center gap-2">
+                    <FileText className="w-4 h-4" /> Prompt & Reference Image
+                  </label>
+                  <div className="relative bg-white/5 border border-white/10 rounded-2xl focus-within:ring-2 focus-within:ring-orange-500/50 transition-all flex flex-col">
+                    <textarea
+                      value={t2iPrompt}
+                      onChange={(e) => setT2iPrompt(e.target.value)}
+                      placeholder="Describe the image you want to generate..."
+                      className="w-full h-32 bg-transparent p-4 text-white placeholder:text-white/20 focus:outline-none resize-none"
+                    />
+                    
+                    <div className="flex items-center justify-between p-3 border-t border-white/5">
+                      <div className="flex items-center gap-2">
+                        {t2iImage && (
+                          <div className="relative group">
+                            <img src={t2iImage} alt="Reference" className="h-12 w-12 object-cover rounded-lg border border-white/20" />
+                            <button 
+                              onClick={() => setT2iImage(null)}
+                              className="absolute -top-2 -right-2 bg-red-500 text-white rounded-full p-0.5 opacity-0 group-hover:opacity-100 transition-opacity"
+                            >
+                              <X className="w-3 h-3" />
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                      <div>
+                        <button
+                          onClick={() => t2iInputRef.current?.click()}
+                          className="p-2 bg-white/10 hover:bg-white/20 rounded-xl text-white transition-colors flex items-center gap-2 text-sm"
+                          title="Add reference image"
+                        >
+                          <Plus className="w-4 h-4" />
+                          <span className="hidden sm:inline">Add Image</span>
+                        </button>
+                        <input 
+                          type="file" 
+                          ref={t2iInputRef} 
+                          onChange={handleT2iImageUpload} 
+                          className="hidden" 
+                          accept="image/*"
+                        />
+                      </div>
+                    </div>
+                  </div>
+                </div>
+                <div className="w-full md:w-48 space-y-6">
+                  <div className="space-y-4">
+                    <label className="block text-sm font-medium text-white/60 mb-2 flex items-center gap-2">
+                      <Monitor className="w-4 h-4" /> Aspect Ratio
+                    </label>
+                    <div className="grid grid-cols-3 gap-2">
+                      {(['1:1', '16:9', '9:16'] as const).map((ratio) => (
+                        <button
+                          key={ratio}
+                          onClick={() => setT2iAspectRatio(ratio)}
+                          className={`py-2 px-2 rounded-xl text-xs font-medium transition-all ${t2iAspectRatio === ratio ? 'bg-orange-500 text-white' : 'bg-white/5 text-white/60 hover:bg-white/10'}`}
+                        >
+                          {ratio}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className="space-y-4">
+                    <label className="block text-sm font-medium text-white/60 mb-2 flex items-center gap-2">
+                      <Settings className="w-4 h-4" /> Quality
+                    </label>
+                    <div className="grid grid-cols-3 gap-2">
+                      {(['512px', '1K', '2K'] as const).map((res) => (
+                        <button
+                          key={res}
+                          onClick={() => setT2iResolution(res)}
+                          className={`py-2 px-2 rounded-xl text-xs font-medium transition-all ${t2iResolution === res ? 'bg-orange-500 text-white' : 'bg-white/5 text-white/60 hover:bg-white/10'}`}
+                        >
+                          {res}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <button
+                onClick={performT2iGeneration}
+                disabled={!t2iPrompt.trim() || isT2iProcessing}
+                className="w-full py-4 bg-white text-black rounded-xl font-bold text-lg hover:bg-orange-500 hover:text-white transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+              >
+                {isT2iProcessing ? (
+                  <>
+                    <Loader2 className="w-6 h-6 animate-spin" />
+                    Generating...
+                  </>
+                ) : (
+                  <>
+                    <Sparkles className="w-6 h-6" />
+                    Generate Image
+                  </>
+                )}
+              </button>
+
+              {t2iError && (
+                <div className="p-4 bg-red-500/10 border border-red-500/20 rounded-xl text-red-400 text-sm">
+                  {t2iError}
+                </div>
+              )}
+            </div>
+
+            {/* Result Section */}
+            <div className="space-y-6">
+              <h2 className="text-xl font-semibold flex items-center gap-2">
+                Result <span className="text-[10px] bg-orange-500/20 text-orange-400 px-2 py-0.5 rounded-full border border-orange-500/30 font-mono">{t2iResolution}</span>
+              </h2>
+
+              <div className={`relative rounded-3xl bg-white/5 border border-white/10 overflow-hidden flex flex-col items-center justify-center group transition-all duration-500 ${
+                t2iAspectRatio === '16:9' ? 'aspect-video' : 
+                t2iAspectRatio === '9:16' ? 'aspect-[9/16] max-h-[70vh] mx-auto' : 
+                'aspect-square max-w-2xl mx-auto'
+              }`}>
+                <AnimatePresence mode="wait">
+                  {t2iResult ? (
+                    <motion.div
+                      key="t2i-result"
+                      initial={{ opacity: 0, scale: 0.95 }}
+                      animate={{ opacity: 1, scale: 1 }}
+                      className="w-full h-full relative flex flex-col"
+                    >
+                      <img 
+                        src={t2iResult} 
+                        alt="Generated Result" 
+                        className="w-full h-full object-contain bg-black flex-1"
+                        referrerPolicy="no-referrer"
+                      />
+                      <div className="absolute top-4 right-4 flex gap-2">
+                        <a 
+                          href={t2iResult} 
+                          download="ai-generated-image.png"
+                          className="p-3 bg-black/50 text-white rounded-full shadow-xl hover:bg-orange-500 transition-all backdrop-blur-md"
+                          title="Download Image"
+                        >
+                          <Download className="w-5 h-5" />
+                        </a>
+                      </div>
+                    </motion.div>
+                  ) : isT2iProcessing ? (
+                    <motion.div 
+                      key="t2i-loading"
+                      initial={{ opacity: 0 }}
+                      animate={{ opacity: 1 }}
+                      exit={{ opacity: 0 }}
+                      className="flex flex-col items-center gap-6 p-8 text-center"
+                    >
+                      <div className="relative">
+                        <div className="w-20 h-20 border-4 border-white/10 border-t-orange-500 rounded-full animate-spin" />
+                        <Sparkles className="absolute inset-0 m-auto w-8 h-8 text-orange-500 animate-pulse" />
+                      </div>
+                      <div>
+                        <p className="text-white font-medium mb-2">Generating your image...</p>
+                        <p className="text-white/40 text-sm max-w-[250px]">
+                          This might take a few seconds.
+                        </p>
+                      </div>
+                    </motion.div>
+                  ) : (
+                    <motion.div 
+                      key="t2i-placeholder"
+                      initial={{ opacity: 0 }}
+                      animate={{ opacity: 1 }}
+                      className="text-center p-12"
+                    >
+                      <div className="w-20 h-20 bg-white/5 rounded-full flex items-center justify-center mx-auto mb-6 border border-white/10">
+                        <ImageIcon className="w-8 h-8 text-white/20" />
+                      </div>
+                      <p className="text-white/20 max-w-[200px] mx-auto">Enter a prompt to generate an image</p>
+                    </motion.div>
+                  )}
+                </AnimatePresence>
+              </div>
+            </div>
+          </div>
+        )}
+
         {activeTab === 'image' && (
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-12 items-start">
           
@@ -511,6 +863,24 @@ export default function App() {
               </div>
             </div>
 
+            {/* Quality Selection */}
+            <div className="space-y-4">
+              <label className="block text-sm font-medium text-white/60 flex items-center gap-2">
+                <Settings className="w-4 h-4" /> Output Quality
+              </label>
+              <div className="flex gap-2">
+                {(['512px', '1K', '2K'] as const).map((res) => (
+                  <button
+                    key={res}
+                    onClick={() => setSwapResolution(res)}
+                    className={`flex-1 py-3 rounded-xl text-sm font-medium transition-all ${swapResolution === res ? 'bg-orange-500 text-white' : 'bg-white/5 text-white/60 hover:bg-white/10'}`}
+                  >
+                    {res}
+                  </button>
+                ))}
+              </div>
+            </div>
+
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <button
                 onClick={() => performSwap('single')}
@@ -560,7 +930,7 @@ export default function App() {
           <div className="space-y-6">
             <div className="flex items-center justify-between">
               <h2 className="text-xl font-semibold flex items-center gap-2">
-                Result <span className="text-[10px] bg-orange-500/20 text-orange-400 px-2 py-0.5 rounded-full border border-orange-500/30 font-mono">1080p</span>
+                Result <span className="text-[10px] bg-orange-500/20 text-orange-400 px-2 py-0.5 rounded-full border border-orange-500/30 font-mono">{swapResolution}</span>
               </h2>
               {resultImages.length > 0 && (
                 <button 
@@ -653,7 +1023,7 @@ export default function App() {
                     ) : (
                       <div className="absolute inset-0 flex flex-col items-center justify-center p-4 text-center">
                         <Upload className="w-6 h-6 text-white/20 mb-2 group-hover:text-purple-400 transition-colors" />
-                        <p className="text-xs text-white/40">Start Frame (Required)</p>
+                        <p className="text-xs text-white/40">Start Frame (Optional)</p>
                       </div>
                     )}
                     <input 
@@ -697,24 +1067,49 @@ export default function App() {
                 </div>
               </div>
 
-              {/* Aspect Ratio */}
-              <div className="space-y-4">
-                <label className="block text-sm font-medium text-white/60 flex items-center gap-2">
-                  <Monitor className="w-4 h-4" /> Aspect Ratio
-                </label>
-                <div className="flex gap-4">
-                  <button
-                    onClick={() => setVideoAspectRatio('16:9')}
-                    className={`flex-1 py-3 rounded-xl font-semibold text-sm flex items-center justify-center gap-2 transition-all ${videoAspectRatio === '16:9' ? 'bg-purple-500 text-white shadow-[0_0_20px_rgba(168,85,247,0.3)]' : 'bg-white/5 text-white/60 hover:bg-white/10'}`}
-                  >
-                    <Monitor className="w-4 h-4" /> 16:9 (Landscape)
-                  </button>
-                  <button
-                    onClick={() => setVideoAspectRatio('9:16')}
-                    className={`flex-1 py-3 rounded-xl font-semibold text-sm flex items-center justify-center gap-2 transition-all ${videoAspectRatio === '9:16' ? 'bg-purple-500 text-white shadow-[0_0_20px_rgba(168,85,247,0.3)]' : 'bg-white/5 text-white/60 hover:bg-white/10'}`}
-                  >
-                    <Smartphone className="w-4 h-4" /> 9:16 (Portrait)
-                  </button>
+              {/* Aspect Ratio & Resolution */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
+                <div className="space-y-4">
+                  <label className="block text-sm font-medium text-white/60 flex items-center gap-2">
+                    <Monitor className="w-4 h-4" /> Aspect Ratio
+                  </label>
+                  <div className="flex gap-2">
+                    <button
+                      onClick={() => setVideoAspectRatio('16:9')}
+                      className={`flex-1 py-3 rounded-xl font-semibold text-xs flex items-center justify-center gap-2 transition-all ${videoAspectRatio === '16:9' ? 'bg-purple-500 text-white shadow-[0_0_20px_rgba(168,85,247,0.3)]' : 'bg-white/5 text-white/60 hover:bg-white/10'}`}
+                    >
+                      <Monitor className="w-4 h-4" /> 16:9
+                    </button>
+                    <button
+                      onClick={() => setVideoAspectRatio('9:16')}
+                      className={`flex-1 py-3 rounded-xl font-semibold text-xs flex items-center justify-center gap-2 transition-all ${videoAspectRatio === '9:16' ? 'bg-purple-500 text-white shadow-[0_0_20px_rgba(168,85,247,0.3)]' : 'bg-white/5 text-white/60 hover:bg-white/10'}`}
+                    >
+                      <Smartphone className="w-4 h-4" /> 9:16
+                    </button>
+                  </div>
+                </div>
+
+                <div className="space-y-4">
+                  <label className="block text-sm font-medium text-white/60 flex items-center gap-2">
+                    <Settings className="w-4 h-4" /> Quality
+                  </label>
+                  <div className="flex gap-2">
+                    <button
+                      onClick={() => setVideoResolution('720p')}
+                      disabled={!!videoEndImage}
+                      className={`flex-1 py-3 rounded-xl font-semibold text-xs flex items-center justify-center gap-2 transition-all ${videoResolution === '720p' || videoEndImage ? 'bg-purple-500 text-white shadow-[0_0_20px_rgba(168,85,247,0.3)]' : 'bg-white/5 text-white/60 hover:bg-white/10'} disabled:opacity-50 disabled:cursor-not-allowed`}
+                    >
+                      720p
+                    </button>
+                    <button
+                      onClick={() => setVideoResolution('1080p')}
+                      disabled={!!videoEndImage}
+                      className={`flex-1 py-3 rounded-xl font-semibold text-xs flex items-center justify-center gap-2 transition-all ${videoResolution === '1080p' && !videoEndImage ? 'bg-purple-500 text-white shadow-[0_0_20px_rgba(168,85,247,0.3)]' : 'bg-white/5 text-white/60 hover:bg-white/10'} disabled:opacity-50 disabled:cursor-not-allowed`}
+                      title={videoEndImage ? "1080p is not supported when using an End Frame" : ""}
+                    >
+                      1080p
+                    </button>
+                  </div>
                 </div>
               </div>
 
@@ -773,9 +1168,9 @@ export default function App() {
 
               <button
                 onClick={performVideoGeneration}
-                disabled={!videoImage || !videoPrompt || isVideoProcessing}
+                disabled={!videoPrompt || isVideoProcessing}
                 className={`w-full py-4 rounded-xl font-semibold text-sm transition-all flex items-center justify-center gap-2
-                  ${!videoImage || !videoPrompt || isVideoProcessing 
+                  ${!videoPrompt || isVideoProcessing 
                     ? 'bg-white/5 text-white/20 cursor-not-allowed' 
                     : 'bg-white text-black hover:bg-purple-500 hover:text-white shadow-[0_0_30px_rgba(255,255,255,0.1)] hover:shadow-purple-500/40'}`}
               >
